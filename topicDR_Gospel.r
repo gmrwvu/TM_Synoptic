@@ -1,4 +1,4 @@
-
+#use install packages to be sure each of the libraries below is installed before running
 library(ggraph)
 library(gutenbergr)
 library(tidytext)
