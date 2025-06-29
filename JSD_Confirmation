@@ -1,0 +1,306 @@
+
+library(ggraph)
+library(gutenbergr)
+library(tidytext)
+library(tidyr)
+library(dplyr)
+library(topicmodels)
+library(stringr)
+library(tidyverse)
+library(dplyr)
+library(lsa)
+library(readr)
+library(tibble)
+library(data.table)
+library(philentropy)
+library(svglite)
+library(ggdendro)
+
+#==================================
+# CONSTANTS
+#==================================
+newSTOP<-c("thee","thou","thy","ye", "doth", "hath")
+kEstablished<-TRUE
+
+#==================================
+# FUNCTIONS
+#==================================
+
+#=============================================================
+#1.) CONVERT SOURCE TEXT TO TIDY
+#convert list of books just read into a structure used in program
+#=============================================================
+convert_tidy<-function(nt_books) {
+  #group df by gutenberg-id and add chpater, linenumber
+  tidy_bks <- nt_books %>%
+    group_by(gutenberg_id) %>%
+    mutate(
+      linenumber = row_number(),
+      chapter = cumsum(str_detect(text, 
+                                regex("^.*chapter [\\divxlc]", 
+                                      ignore_case = TRUE))))  
+  #after ch and line, get ungroups version of that
+  tidy_books<- tidy_bks %>% ungroup()
+
+  return(tidy_books)
+}
+
+#=============================================================
+#2.) TIDY_UP
+#row by row format
+#=============================================================
+tidy_up<-function(fn_bks){
+   gmr_word <- fn_bks %>%
+     unnest_tokens(word, text)
+
+   sw<-stop_words
+   for (i in 1:length(newSTOP)){
+       sw<-sw %>% add_row(word=newSTOP[i], lexicon = "custom")
+   }
+
+   #this below is only for relationshiop word anslysis
+   #stop_words remove importsant relationship words
+    #buit not usding relationship word analysios
+   #sw<-newSTOP
+   #==============================================
+   #    remove above after coding to 
+   #    take rel words out of stop_words
+   #==============================================
+   
+   gmr_word_counts <- gmr_word %>%
+     #anti_join(stop_words) %>%
+     anti_join(sw) %>%
+     dplyr::count(gutenberg_id, word, sort = TRUE) %>%
+     ungroup()
+
+   gmr_dtm <- gmr_word_counts %>%
+     cast_dtm(gutenberg_id, word, n)
+
+   return(gmr_dtm)
+}
+
+#=============================================================
+#3.) GET RID OF DR CHPT VERSE numbers
+#=============================================================
+rid_annotations<-function(book){
+  fxNT_Corpus<-book
+  for (i in 1:length(book[[2]])){
+     fxNT_Corpus[[2]][i]<-gsub('[0-9]+.[0-9]+.','', book[[2]][i])
+  }
+  book<-fxNT_Corpus
+  return(book)  
+}
+
+#=============================================================
+#4.) GET K
+#=============================================================
+get_k <- function(in_dtm) {
+  #get Perplex - k needs to be atleast 2 by direction of LDA function
+  pList <- 99999
+  for (K in 2:10){ 
+    nt_lda <- LDA(in_dtm, k = K, control = list(seed = 1234))
+    gmrPerplex<-perplexity(nt_lda)
+    pList <- c(pList, gmrPerplex)
+  }
+  return(which.min(pList))
+}
+
+#=============================================================
+#5.) CREATE MODEL
+#=============================================================
+make_lda <- function(nt_dtm, K) {
+  nt_lda <- LDA(nt_dtm, k = K, control = list(seed = 1234))
+  return(nt_lda)
+}
+
+#=============================================================
+#6.) READ DOUAY-RHEIMS GUTENBERG BY ID
+#=============================================================
+read_dr<-function(ID){
+  return(as.data.frame(list(gutenberg_download(c(ID),mirror = "http://mirrors.xmission.com/gutenberg/"))))
+}
+
+#===========================================================
+#7.) Statistical significance
+#    Split into two groups:
+#    1.)synoptic to Synoptic and 
+#    2.) all other pairings
+#===========================================================
+stat_sig<-function(sorted_similarity) {
+   #1.) get group for Synoptic to Synoptic
+   vS2S<- c()
+   for (i in 1:3){
+     for (j in 1:3){
+       if(i != j) {
+         vS2S<-append(vS2S, sorted_similarity[i,j])
+       }
+     }
+   }
+
+   #2.) get the group for all pairings other than Synoptic to Synoptic
+   vOth<- c()
+   for (i in 1:27){
+     for (j in 1:27){
+       if(i != j) {           #don't include comaprisons of a book to itself
+          if(!(j %in% 1:3) || !(i %in% 1:3)){   #don't include the 3 Synoptic comparisons to themselves
+            vOth<-append(vOth, sorted_similarity[i,j])
+          }
+       }
+     }
+   }
+   #using origina data and assuming symmetric distribution
+   return(t.test(vOth, vS2S, var.equal = FALSE))
+}
+
+#============================================================
+#8.) Do cluster and dendrogram
+#============================================================
+do_dendro<-function(doc_dist, mth) {
+   # Perform hierarchical clustering
+   hc <- hclust(doc_dist, method = "ward.D2")
+
+   # Plot the dendrogram
+   main<-c(mth, " Clustering of Topics")
+   plot(hc, main = main, xlab = "New Testament Books")
+   dend <- as.dendrogram(hc)
+   dend_data <- dendro_data(dend)
+   
+   image<-ggplot(dend_data$segments) +
+    geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) +
+    geom_text(data = dend_data$labels, aes(x, y, label = label),   hjust = 1, angle = 90, size = 3) +
+  ylim(0, max(dend_data$segments$y) + 1)  # Adjust ylim as needed
+   ggsave(file="c:/labs/test.svg", plot=image, width=10, height=8, device="svg")  
+
+}
+
+#==================================
+# END OF FUNCTIONS
+#==================================
+
+#==================================
+#  MAIN 
+#==================================
+
+book_names<-c("mt","mr","lk","jn","act","rm","fcr","scr", "ga", "eph", "pp", "co", "fth", "sth","ftm","stm","ti","ph","hb","jam","fpt","spt", "fjn","sjn","tjn","jud","rev")  
+Num_Books<-c("8347":"8373")
+
+Num_Books_s<-as.character(Num_Books)
+
+#==================================
+#Process DR - read Gutenberg
+#==================================
+nt_data <- list()
+nt_data <- lapply(Num_Books, read_dr)
+
+#===================================
+#get rid of garbage in Rev text
+#In line 312 of text
+#===================================
+nt_data[[27]]$text[312]<-"of God. The beginning, that is, the principle, the source,"
+
+#==================================
+#finish clean-up
+#==================================
+nt_clean <- lapply(nt_data, rid_annotations)
+
+#==================================
+#Combine into a Corpus
+#==================================
+ntCorpus<-rbindlist(nt_clean)
+
+#==================================
+#tidy up to dtm
+#==================================
+#change to tidy format - linenumber chapter added
+tidy_books<-convert_tidy(ntCorpus)
+
+#get corpus as dtm
+nt_dtm<-tidy_up(tidy_books)
+
+#==================================
+#get Perplex curve - k needs to be integre of atleast 2 
+#by direction of LDA function
+#this takes a while: once K is established, skip this section
+#==================================
+if(!kEstablished){
+  for (K in 2:100){ 
+    nt_lda <- LDA(nt_dtm, k = K, control = list(seed = 1234))
+    gmrPerplex<-perplexity(nt_lda)
+    print(c(K, gmrPerplex))
+  }
+}
+
+K<-21
+
+#===================================
+#create topic model
+#===================================
+nt_lda <- LDA(nt_dtm, k = K, control = list(seed = 1234))
+gmrPerplex<-perplexity(nt_lda)
+
+doc_topics <- posterior(nt_lda)$topics  # rows are books,columns are topics
+sorted_topics<-doc_topics[Num_Books_s,]
+
+
+#===============================================================
+#Confirmation of Cosine Similarity with Jenson-Shannon distance
+#===============================================================
+rownames(sorted_topics)<-book_names
+m <- matrix(NA, nrow = 27, ncol = 27)
+
+#make the 729 pairings (27 * 27) with nested for loops
+#calcualte the JSD for each pair and store in a matrix
+#print pairings that are close
+for (i in 1:27) {
+    for (j in 1:27) {
+      r<-rbind(sorted_topics[i,], sorted_topics[j,])
+      s<-philentropy::JSD(r)
+      u<-unname(s)
+      m[i,j]<-u
+      if(u <.5) {
+         print(c(rownames(sorted_topics)[i], rownames(sorted_topics)[j]))
+         print(u)
+         print("========================")
+      }
+    }
+}
+
+#=======================================================
+#Analyze the JSD matrix (less distance)
+#=======================================================
+MT_LK_sim <- m[1,3]
+MT_LK_count <- sum(m < MT_LK_sim)
+print(MT_LK_count)
+
+MT_MR_sim <- m[1,2]
+MT_MR_count <- sum(m < MT_MR_sim)
+print(MT_MR_count)
+
+LK_MR_sim<- m[3,2]
+LK_MR_count <- sum(m < LK_MR_sim)
+print(LK_MR_count)
+
+#==========================================================
+#Compare JSD to Cosine
+#==========================================================
+#show pairs for both methods to see how they match
+#create a table for paper on how they match up
+
+#put in row, col names for m (JSD) and sorted_sim (Cosine)
+rownames(m)<-book_names
+colnames(m)<-book_names
+
+#=========================================================
+#Dendo for entire NT
+#=========================================================
+# Convert JSD to dist
+doc_dist <- as.dist(m)
+dev.new()
+do_dendro(doc_dist, "JSD Based")
+
+#================================
+#Get Statistical Significance
+#================================
+sig<-stat_sig(m)
+
+
